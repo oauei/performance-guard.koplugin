@@ -31,13 +31,11 @@ function PerformanceGuard:init()
     local input_guard_enabled = true
     local sdr_redirect_enabled = true
 
-    if G_reader_settings then
-        if G_reader_settings:has("perf_guard_input_enabled") then
-            input_guard_enabled = G_reader_settings:isTrue("perf_guard_input_enabled")
-        end
-        if G_reader_settings:has("perf_guard_sdr_enabled") then
-            sdr_redirect_enabled = G_reader_settings:isTrue("perf_guard_sdr_enabled")
-        end
+    if G_reader_settings and G_reader_settings.readSetting then
+        local inp_val = G_reader_settings:readSetting("perf_guard_input_enabled")
+        if inp_val ~= nil then input_guard_enabled = (inp_val == true) end
+        local sdr_val = G_reader_settings:readSetting("perf_guard_sdr_enabled")
+        if sdr_val ~= nil then sdr_redirect_enabled = (sdr_val == true) end
     end
 
     InputGuard.enabled = input_guard_enabled
