@@ -151,6 +151,24 @@ function InputGuard.onResume()
     logger.info("[PerformanceGuard] Application resumed: refreshed input guard watchdog")
 end
 
+function InputGuard.onSuspend()
+    if InputGuard.watchdog_timer then
+        UIManager:unschedule(InputGuard.watchdog_timer)
+        InputGuard.watchdog_timer = nil
+    end
+    InputGuard.stall_recovery_until = 0
+    logger.info("[PerformanceGuard] Suspended input guard watchdog for device standby")
+end
+
+function InputGuard.onPause()
+    if InputGuard.watchdog_timer then
+        UIManager:unschedule(InputGuard.watchdog_timer)
+        InputGuard.watchdog_timer = nil
+    end
+    InputGuard.stall_recovery_until = 0
+    logger.info("[PerformanceGuard] Paused input guard watchdog")
+end
+
 function InputGuard.enable()
     InputGuard.enabled = true
     InputGuard.last_heartbeat = time.now()

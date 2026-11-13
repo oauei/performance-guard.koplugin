@@ -56,6 +56,14 @@ function PerformanceGuard:onResume()
     InputGuard.onResume()
 end
 
+function PerformanceGuard:onSuspend()
+    InputGuard.onSuspend()
+end
+
+function PerformanceGuard:onPause()
+    InputGuard.onPause()
+end
+
 function PerformanceGuard:runMigration()
     local confirm = ConfirmBox:new{
         text = _("Scan external MicroSD storage and migrate all book .sdr metadata folders to fast internal storage?\n\nThis completely eliminates MicroSD write stalls during page turns and prevents metadata corruption."),
