@@ -62,13 +62,20 @@ function PerformanceGuard:runMigration()
         ok_text = _("Migrate Now"),
         cancel_text = _("Cancel"),
         ok_callback = function()
-            UIManager:show(Notification:new{
-                text = _("Migrating metadata folders to internal storage..."),
-                timeout = 2,
-            })
+            local notif = Notification:new{
+                text = _("Scanning for metadata folders to migrate..."),
+            }
+            UIManager:show(notif)
 
-            UIManager:nextTick(function()
-                local res = SdrRedirect.migrateExternalSdr()
+            local progress_cb = function(idx, total, migrated)
+                if notif and notif.setText then
+                    notif:setText(string.format(_("Migrating metadata: %d / %d folders..."), idx, total))
+                    UIManager:setDirty(notif, "ui")
+                end
+            end
+
+            local on_complete = function(res)
+                if notif then UIManager:close(notif) end
                 if res.total == 0 then
                     UIManager:show(InfoMessage:new{
                         text = _("No .sdr metadata folders found on external MicroSD storage.\n\nAll books are already using internal storage or have no cached metadata."),
@@ -79,7 +86,9 @@ function PerformanceGuard:runMigration()
                             res.migrated, res.total, res.files, res.failed),
                     })
                 end
-            end)
+            end
+
+            SdrRedirect.migrateExternalSdr(progress_cb, on_complete)
         end,
     }
     UIManager:show(confirm)

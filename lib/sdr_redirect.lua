@@ -19,7 +19,8 @@ local function isExternalStorage(path)
     if path:match("^/storage/emulated/") or path:match("^/sdcard/") or path:match("^/data/") then
         return false
     end
-    if path:match("^/storage/[^/]+/") or path:match("^/mnt/media_rw/") then
+    local norm = path:sub(-1) == "/" and path or (path .. "/")
+    if norm:match("^/storage/[^/]+/") or norm:match("^/mnt/media_rw/") then
         return true
     end
     return false
@@ -104,11 +105,22 @@ function SdrRedirect.init(plugin_instance)
 end
 
 local function copyAndVerifyFile(src, dst)
-    local rf = io.open(src, "rb")
-    if not rf then return false, "Cannot open source file" end
-
     local dest_dir = dst:match("^(.*)/[^/]+$")
     if dest_dir then util.makePath(dest_dir .. "/") end
+
+    if ffiutil and ffiutil.copyFile then
+        local ok, res = pcall(ffiutil.copyFile, src, dst)
+        if ok and res then
+            local src_size = lfs.attributes(src, "size")
+            local dst_size = lfs.attributes(dst, "size")
+            if src_size and dst_size and src_size == dst_size then
+                return true
+            end
+        end
+    end
+
+    local rf = io.open(src, "rb")
+    if not rf then return false, "Cannot open source file" end
 
     local wf = io.open(dst, "wb")
     if not wf then
@@ -133,22 +145,44 @@ local function copyAndVerifyFile(src, dst)
     return false, "Verification failed: size mismatch"
 end
 
---- Recursively finds all .sdr directories within a path
-local function findSdrFolders(root_dir, results)
+local _system_dirs = {
+    ["android"] = true,
+    ["dcim"] = true,
+    ["download"] = true,
+    ["downloads"] = true,
+    ["music"] = true,
+    ["movies"] = true,
+    ["pictures"] = true,
+    ["lost.dir"] = true,
+    [".thumbnails"] = true,
+}
+
+--- Recursively finds all .sdr directories within a path, skipping non-book system folders
+local function findSdrFolders(root_dir, results, seen_sdr)
     results = results or {}
+    seen_sdr = seen_sdr or {}
     if not root_dir or lfs.attributes(root_dir, "mode") ~= "directory" then
         return results
     end
 
-    for item in lfs.dir(root_dir) do
+    local ok_dir, iter = pcall(lfs.dir, root_dir)
+    if not ok_dir or not iter then return results end
+
+    for item in iter do
         if item ~= "." and item ~= ".." then
-            local full_path = root_dir .. "/" .. item
-            local mode = lfs.attributes(full_path, "mode")
-            if mode == "directory" then
-                if item:sub(-4) == ".sdr" then
-                    table.insert(results, full_path)
-                else
-                    findSdrFolders(full_path, results)
+            local item_lower = item:lower()
+            if not _system_dirs[item_lower] then
+                local full_path = root_dir .. "/" .. item
+                local mode = lfs.attributes(full_path, "mode")
+                if mode == "directory" then
+                    if item:sub(-4) == ".sdr" then
+                        if not seen_sdr[full_path] then
+                            seen_sdr[full_path] = true
+                            table.insert(results, full_path)
+                        end
+                    else
+                        findSdrFolders(full_path, results, seen_sdr)
+                    end
                 end
             end
         end
@@ -157,20 +191,70 @@ local function findSdrFolders(root_dir, results)
 end
 
 --- Scans external MicroSD storage and migrates all .sdr folders to internal storage
-function SdrRedirect.migrateExternalSdr(progress_callback)
+function SdrRedirect.migrateExternalSdr(progress_callback, on_complete)
     local docsettings_dir = DataStorage:getDocSettingsDir()
     local sdr_folders = {}
 
-    -- Scan external mounts under /storage/
+    local scan_roots = {}
+    local seen_roots = {}
+    local function addScanRoot(dir)
+        if type(dir) == "string" and dir ~= "" and not seen_roots[dir] then
+            seen_roots[dir] = true
+            if isExternalStorage(dir) and lfs.attributes(dir, "mode") == "directory" then
+                table.insert(scan_roots, dir)
+            end
+        end
+    end
+
+    -- 1. Scan all external mounts under /storage/
     if lfs.attributes("/storage", "mode") == "directory" then
         for mount in lfs.dir("/storage") do
             if mount ~= "." and mount ~= ".." and mount ~= "emulated" and mount ~= "self" then
                 local mount_path = "/storage/" .. mount
                 if lfs.attributes(mount_path, "mode") == "directory" then
-                    findSdrFolders(mount_path, sdr_folders)
+                    addScanRoot(mount_path)
                 end
             end
         end
+    end
+
+    -- 2. Scan all external mounts under /mnt/media_rw/
+    if lfs.attributes("/mnt/media_rw", "mode") == "directory" then
+        for mount in lfs.dir("/mnt/media_rw") do
+            if mount ~= "." and mount ~= ".." then
+                local mount_path = "/mnt/media_rw/" .. mount
+                if lfs.attributes(mount_path, "mode") == "directory" then
+                    addScanRoot(mount_path)
+                end
+            end
+        end
+    end
+
+    -- 3. Include Kokomga download dir and user home_dir (if external and not already covered)
+    local ok_pl, PluginLoader = pcall(require, "pluginloader")
+    local loaded = ok_pl and PluginLoader and PluginLoader.loaded_plugins or nil
+    local komga = loaded and loaded["kokomga"]
+    local komga_dl = komga and komga.getDownloadDir and komga:getDownloadDir()
+    if not komga_dl then
+        local ok_ds, DataStorageMod = pcall(require, "datastorage")
+        local ok_ls, LuaSettings = pcall(require, "luasettings")
+        if ok_ds and ok_ls and DataStorageMod and LuaSettings then
+            local ok_k, ks = pcall(LuaSettings.open, LuaSettings, DataStorageMod:getSettingsDir() .. "/kokomga.lua")
+            if ok_k and ks and ks.readSetting then
+                komga_dl = ks:readSetting("download_dir")
+            end
+        end
+    end
+    addScanRoot(komga_dl)
+
+    if G_reader_settings and G_reader_settings.readSetting then
+        addScanRoot(G_reader_settings:readSetting("home_dir"))
+    end
+
+    -- Scan all discovered external roots, tracking seen .sdr paths to prevent duplicates
+    local seen_sdr = {}
+    for _, root in ipairs(scan_roots) do
+        findSdrFolders(root, sdr_folders, seen_sdr)
     end
 
     local total_folders = #sdr_folders
@@ -180,7 +264,8 @@ function SdrRedirect.migrateExternalSdr(progress_callback)
 
     logger.info(string.format("[PerformanceGuard] Found %d .sdr folders on external storage to migrate", total_folders))
 
-    for idx, sdr_dir in ipairs(sdr_folders) do
+    local function processFolder(idx)
+        local sdr_dir = sdr_folders[idx]
         local target_sdr = docsettings_dir .. sdr_dir
         util.makePath(target_sdr .. "/")
 
@@ -220,6 +305,56 @@ function SdrRedirect.migrateExternalSdr(progress_callback)
         if progress_callback then
             progress_callback(idx, total_folders, migrated_folders)
         end
+    end
+
+    local ok_ui, UIManager = pcall(require, "ui/uimanager")
+    local can_async = on_complete and ok_ui and UIManager and UIManager.scheduleIn
+
+    if can_async then
+        local BATCH_SIZE = 5
+        local current_idx = 1
+
+        local function step()
+            local count = 0
+            while current_idx <= total_folders and count < BATCH_SIZE do
+                processFolder(current_idx)
+                current_idx = current_idx + 1
+                count = count + 1
+            end
+
+            if current_idx <= total_folders then
+                UIManager:scheduleIn(0.02, step)
+            else
+                local res = {
+                    total = total_folders,
+                    migrated = migrated_folders,
+                    files = migrated_files,
+                    failed = failed_folders,
+                }
+                logger.info(string.format("[PerformanceGuard] Sliced migration complete: %d folders migrated (%d files), %d failed",
+                    migrated_folders, migrated_files, failed_folders))
+                on_complete(res)
+            end
+        end
+
+        if total_folders == 0 then
+            local res = { total = 0, migrated = 0, files = 0, failed = 0 }
+            on_complete(res)
+            return res
+        end
+
+        UIManager:scheduleIn(0.02, step)
+        return {
+            total = total_folders,
+            migrated = 0,
+            files = 0,
+            failed = 0,
+        }
+    end
+
+    -- Synchronous fallback
+    for idx = 1, total_folders do
+        processFolder(idx)
     end
 
     logger.info(string.format("[PerformanceGuard] Migration complete: %d folders migrated (%d files), %d failed",
