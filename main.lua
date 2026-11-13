@@ -27,6 +27,10 @@ local PerformanceGuard = WidgetContainer:extend{
 function PerformanceGuard:init()
     PerformanceGuard.instance = self
 
+    if self.ui and self.ui.menu then
+        self.ui.menu:registerToMainMenu(self)
+    end
+
     -- Load settings
     local input_guard_enabled = true
     local sdr_redirect_enabled = true
