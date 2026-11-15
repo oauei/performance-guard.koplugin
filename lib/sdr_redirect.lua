@@ -7,6 +7,24 @@ local util = require("util")
 local ffiutil = require("ffi/util")
 local lfs = require("libs/libkoreader-lfs")
 
+local _dump_mod = nil
+local function getDump()
+    if not _dump_mod then
+        _dump_mod = require("dump")
+    end
+    return _dump_mod
+end
+
+local _luasettings_mod = nil
+local function getLuaSettings()
+    if not _luasettings_mod then
+        _luasettings_mod = require("luasettings")
+    end
+    return _luasettings_mod
+end
+
+local _ensured_dirs = {}
+
 local SdrRedirect = {
     enabled = true,
     initialized = false,
@@ -16,11 +34,14 @@ local SdrRedirect = {
 
 local function isExternalStorage(path)
     if type(path) ~= "string" or path == "" then return false end
-    if path:match("^/storage/emulated/") or path:match("^/sdcard/") or path:match("^/data/") then
+    if path:sub(1, 18) == "/storage/emulated/" or path:sub(1, 8) == "/sdcard/" or path:sub(1, 6) == "/data/" then
         return false
     end
-    local norm = path:sub(-1) == "/" and path or (path .. "/")
-    if norm:match("^/storage/[^/]+/") or norm:match("^/mnt/media_rw/") then
+    if path:sub(1, 14) == "/mnt/media_rw/" then
+        return true
+    end
+    local ext_id = path:match("^/storage/([^/]+)")
+    if ext_id and ext_id ~= "emulated" and ext_id ~= "self" then
         return true
     end
     return false
@@ -29,8 +50,21 @@ end
 local function getRedirectedSdrDir(doc_path)
     if not doc_path or doc_path == "" then return "" end
     local docsettings_dir = DataStorage:getDocSettingsDir()
-    local path = doc_path:match("(.*)%.") or doc_path
-    return docsettings_dir .. path .. ".sdr"
+    local clean_doc = doc_path:gsub("%z", "")
+    local path = clean_doc:match("(.*)%.") or clean_doc
+    path = path:gsub("%%2e%%2e", ".."):gsub("%%2E%%2E", "..")
+    local parts = {}
+    for segment in path:gmatch("[^/]+") do
+        if segment == ".." then
+            if #parts > 0 then
+                table.remove(parts)
+            end
+        elseif segment ~= "." and segment ~= "" then
+            parts[#parts + 1] = segment
+        end
+    end
+    local normalized = table.concat(parts, "/")
+    return docsettings_dir .. "/" .. normalized .. ".sdr"
 end
 
 function SdrRedirect.isExternalStoragePath(path)
@@ -70,15 +104,18 @@ function SdrRedirect.init(plugin_instance)
 
             if SdrRedirect.enabled and isExternalStorage(doc_path) then
                 local target_dir = self_ds.dir_sidecar_dir or getRedirectedSdrDir(doc_path)
-                util.makePath(target_dir)
+                if not _ensured_dirs[target_dir] then
+                    util.makePath(target_dir)
+                    _ensured_dirs[target_dir] = true
+                end
 
-                local dump = require("dump")
-                local ser_data = dump(data, nil, true)
+                local dump_fn = getDump()
+                local ser_data = dump_fn(data, nil, true)
                 local sidecar_file = target_dir .. "/" .. self_ds.sidecar_filename
                 logger.dbg("[PerformanceGuard] Redirecting SDR write to internal flash:", sidecar_file)
 
-                local LuaSettings = require("luasettings")
-                local directory_updated = LuaSettings:backup(sidecar_file)
+                local ls = getLuaSettings()
+                local directory_updated = ls:backup(sidecar_file)
                 util.writeToFile(ser_data, sidecar_file, true, true, directory_updated)
 
                 if not no_custom_metadata then
@@ -158,10 +195,15 @@ local _system_dirs = {
 }
 
 --- Recursively finds all .sdr directories within a path, skipping non-book system folders
-local function findSdrFolders(root_dir, results, seen_sdr)
+local function findSdrFolders(root_dir, results, seen_sdr, seen_dirs, depth)
     results = results or {}
     seen_sdr = seen_sdr or {}
-    if not root_dir or lfs.attributes(root_dir, "mode") ~= "directory" then
+    seen_dirs = seen_dirs or {}
+    depth = depth or 1
+    if depth > 15 or not root_dir or seen_dirs[root_dir] then return results end
+    seen_dirs[root_dir] = true
+
+    if lfs.attributes(root_dir, "mode") ~= "directory" then
         return results
     end
 
@@ -181,7 +223,7 @@ local function findSdrFolders(root_dir, results, seen_sdr)
                             table.insert(results, full_path)
                         end
                     else
-                        findSdrFolders(full_path, results, seen_sdr)
+                        findSdrFolders(full_path, results, seen_sdr, seen_dirs, depth + 1)
                     end
                 end
             end

@@ -95,11 +95,19 @@ function InputGuard.init(plugin_instance)
                 return InputGuard.orig_sendEvent(self_ui, event)
             end
 
+            local is_high = isHighLevelGesture(event)
+            local is_any = is_high or (event.name == "Touch")
+
+            -- Fast-path non-gesture events when stall/focus recovery windows are inactive
+            if not is_any and InputGuard.ignore_gestures_until == 0 and InputGuard.stall_recovery_until == 0 then
+                return InputGuard.orig_sendEvent(self_ui, event)
+            end
+
             local now = time.now()
 
             -- 1. Check post-focus window (e.g. after clicking 'Wait' on Android ANR dialog)
             if now < InputGuard.ignore_gestures_until then
-                if isAnyGesture(event) then
+                if is_any then
                     logger.info("[PerformanceGuard] Discarded stale gesture during post-focus ANR recovery window: " .. tostring(event.name))
                     return true -- Consumed
                 end
@@ -109,18 +117,15 @@ function InputGuard.init(plugin_instance)
             -- Normal human taps are dispatched immediately with 0ms delay.
             -- Only high-level gestures (Tap/Swipe) arriving within flurry_interval_s of each
             -- other during a post-stall recovery window are suppressed.
-            if now < InputGuard.stall_recovery_until and isHighLevelGesture(event) then
-                local time_since_last_tap = to_seconds(now - InputGuard.last_dispatched_tap_time)
-                if time_since_last_tap < InputGuard.flurry_interval_s then
-                    logger.info(string.format("[PerformanceGuard] Suppressed rapid duplicate flurry '%s' (%.3fs since last tap) during stall recovery",
-                        tostring(event.name), time_since_last_tap))
-                    return true -- Suppress duplicate flurry gesture
+            if is_high then
+                if now < InputGuard.stall_recovery_until then
+                    local time_since_last_tap = to_seconds(now - InputGuard.last_dispatched_tap_time)
+                    if time_since_last_tap < InputGuard.flurry_interval_s then
+                        logger.info(string.format("[PerformanceGuard] Suppressed rapid duplicate flurry '%s' (%.3fs since last tap) during stall recovery",
+                            tostring(event.name), time_since_last_tap))
+                        return true -- Suppress duplicate flurry gesture
+                    end
                 end
-                InputGuard.last_dispatched_tap_time = now
-            end
-
-            -- Record tap time for non-stall conditions as well
-            if isHighLevelGesture(event) then
                 InputGuard.last_dispatched_tap_time = now
             end
 
